@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Validate installer and JSON
+        shell: bash
+        run: |
+          bash -n setup.sh
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          for path in Path('.').rglob('*.json'):
+              if '.git' not in path.parts:
+                  json.loads(path.read_text(encoding='utf-8'))
+          print('JSON files ok')
+          PY
+      - name: Check local Markdown links
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          missing = []
+          for md in Path('.').rglob('*.md'):
+              if '.git' in md.parts:
+                  continue
+              for raw in re.findall(r'\[[^\]]+\]\(([^)]+)\)', md.read_text(encoding='utf-8')):
+                  target = raw.split('#', 1)[0].strip()
+                  if not target or target.startswith(('http://', 'https://', 'mailto:', 'tel:')):
+                      continue
+                  if target.startswith('<') and target.endswith('>'):
+                      target = target[1:-1]
+                  if not (md.parent / target).resolve().exists():
+                      missing.append(f'{md}: {raw}')
+          if missing:
+              raise SystemExit('\n'.join(missing))
+          print('Markdown links ok')
+          PY
+      - name: Smoke-test overlay installation
+        shell: bash
+        run: |
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          upstream="$tmp/upstream"
+          runtime="$tmp/runtime"
+          git init -q -b main "$upstream"
+          git -C "$upstream" config user.name ci
+          git -C "$upstream" config user.email ci@example.invalid
+          printf '{"scripts":{}}\n' > "$upstream/package.json"
+          git -C "$upstream" add package.json
+          git -C "$upstream" commit -qm init
+          CLAUDECLAW_UPSTREAM_URL="$upstream" ./setup.sh "$runtime"
+          test -f "$runtime/agents/tuco/agent.yaml"
+          test -f "$runtime/.claudeclaw/settings.json"
+          test -f "$runtime/.env.banda.example"
+          test -f "$runtime/.env"
+          printf 'preserve\n' > "$runtime/user-owned.txt"
+          CLAUDECLAW_UPSTREAM_URL="$upstream" ./setup.sh "$runtime"
+          test "$(cat "$runtime/user-owned.txt")" = preserve
